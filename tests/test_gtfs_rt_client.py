@@ -531,3 +531,31 @@ async def test_integer_delay_zero_stored_as_zero_not_none() -> None:
     stu = result[0].stop_time_updates[0]
     assert stu.arrival_delay == 0
     assert stu.departure_delay == 0
+
+
+# ---------------------------------------------------------------------------
+# Test — HTTP URL raises ValueError at construction time (issue #4)
+# ---------------------------------------------------------------------------
+
+def test_http_url_raises_value_error() -> None:
+    """GtfsRtClient raises ValueError when feed_url uses http:// scheme."""
+    session = MagicMock(spec=aiohttp.ClientSession)
+    with pytest.raises(ValueError, match="HTTPS"):
+        GtfsRtClient(
+            feed_url="http://api.example.com/gtfs-rt",
+            api_key=_API_KEY,
+            session=session,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test — __repr__ does not expose the API key (issue #9)
+# ---------------------------------------------------------------------------
+
+def test_repr_omits_api_key() -> None:
+    """repr(client) contains the feed URL but not the API key value."""
+    session = MagicMock(spec=aiohttp.ClientSession)
+    client = GtfsRtClient(feed_url=_FEED_URL, api_key=_API_KEY, session=session)
+    result = repr(client)
+    assert _API_KEY not in result
+    assert _FEED_URL in result
