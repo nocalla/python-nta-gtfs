@@ -87,13 +87,29 @@ class GtfsRtClient:
         """Initialise the client.
 
         Args:
-            feed_url: Full URL of the GTFS-RT JSON feed endpoint.
+            feed_url: Full HTTPS URL of the GTFS-RT JSON feed endpoint.  Must
+                use the ``https://`` scheme to protect the API key in transit.
             api_key: API key sent as the ``x-api-key`` request header.
             session: Caller-managed ``aiohttp.ClientSession`` used for all requests.
+
+        Raises:
+            ValueError: ``feed_url`` does not use the ``https://`` scheme.
         """
         self._feed_url = feed_url
         self._api_key = api_key
         self._session = session
+        if not feed_url.startswith("https://"):
+            raise ValueError(
+                f"feed_url must use HTTPS to protect the API key; got: {feed_url!r}"
+            )
+
+    def __repr__(self) -> str:
+        """Return a developer-friendly string representation.
+
+        Returns:
+            String showing the feed URL; the API key is intentionally omitted.
+        """
+        return f"GtfsRtClient(feed_url={self._feed_url!r})"
 
     async def async_fetch_trip_updates(self) -> list[TripUpdate]:
         """Fetch and parse the GTFS-RT trip updates feed.
