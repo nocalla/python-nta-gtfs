@@ -6,12 +6,28 @@ build-backend = "hatchling.build"
 name = "python-nta-gtfs"
 version = "0.1.0"
 description = "Async Python client for NTA GTFS real-time and static feeds"
+authors = [{name = "Niall O'Callaghan", email = "niallwocallaghan@gmail.com"}]
+keywords = ["gtfs", "nta", "transit", "realtime", "async", "aiohttp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: Software Development :: Libraries",
+]
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 dependencies = [
     "aiohttp>=3.9",
 ]
+
+[project.urls]
+"Source Code" = "https://github.com/nocalla/python-nta-gtfs"
+"Bug Tracker" = "https://github.com/nocalla/python-nta-gtfs/issues"
 
 [project.optional-dependencies]
 dev = [
