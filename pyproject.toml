@@ -23,6 +23,7 @@ requires-python = ">=3.12"
 license = { file = "LICENSE" }
 dependencies = [
     "aiohttp>=3.9",
+    "gtfs-realtime-bindings>=2.1.0",
 ]
 
 [project.urls]

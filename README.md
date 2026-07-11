@@ -4,7 +4,7 @@ Async Python client for the Irish National Transport Authority (NTA) GTFS feeds.
 
 ## What it does
 
-`python-nta-gtfs` provides two async clients for working with NTA transit data. `GtfsRtClient` fetches and parses real-time trip updates from the NTA GTFS-RT JSON feed, returning typed dataclass objects for each trip and its stop-level delay information. `StaticGtfsClient` downloads the static GTFS schedule zip, parses it entirely in memory, and exposes synchronous queries to look up scheduled departures for a given stop, route, date, and direction.
+`python-nta-gtfs` provides two async clients for working with NTA transit data. `GtfsRtClient` fetches and parses real-time trip updates from the NTA GTFS-RT protobuf feed, returning typed dataclass objects for each trip and its stop-level delay information. `StaticGtfsClient` downloads the static GTFS schedule zip, parses it entirely in memory, and exposes synchronous queries to look up scheduled departures for a given stop, route, date, and direction.
 
 Both clients accept a caller-supplied `aiohttp.ClientSession` and raise library-specific exceptions on all error conditions. The library is under active development.
 
@@ -73,7 +73,7 @@ Exception hierarchy:
 NtaGtfsError
 ├── GtfsRtAuthError      — HTTP 401 from the GTFS-RT feed
 ├── GtfsRtFetchError     — other HTTP or network error from the GTFS-RT feed
-├── GtfsRtParseError     — response is not valid GTFS-RT JSON
+├── GtfsRtParseError     — response is not a valid GTFS-RT protobuf FeedMessage
 └── StaticGtfsLoadError  — static GTFS zip download or parse failure
 ```
 
@@ -133,3 +133,4 @@ Named tuple representing a single scheduled departure.
 
 - Python 3.12 or later
 - [aiohttp](https://docs.aiohttp.org/) 3.9 or later
+- [gtfs-realtime-bindings](https://pypi.org/project/gtfs-realtime-bindings/) 1.0 or later

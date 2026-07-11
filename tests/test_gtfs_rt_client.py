@@ -1,17 +1,19 @@
 """Unit tests for GtfsRtClient.
 
 All HTTP interactions are mocked via ``unittest.mock`` — no live network calls
-are made.
+are made.  Feed bodies are protobuf-encoded GTFS-RT ``FeedMessage`` payloads
+built with ``google.protobuf.json_format.ParseDict``.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
+from google.protobuf import json_format
+from google.transit import gtfs_realtime_pb2
 
 from nta_gtfs.exceptions import GtfsRtAuthError, GtfsRtFetchError, GtfsRtParseError
 from nta_gtfs.gtfs_rt import GtfsRtClient, StopTimeUpdate, TripUpdate
@@ -24,16 +26,20 @@ _FEED_URL = "https://api.example.com/gtfs-rt"
 _API_KEY = "test-api-key"
 
 
-def _make_feed_payload(entities: list[dict[str, Any]]) -> str:
-    """Serialise a minimal GTFS-RT FeedMessage as JSON.
+def _make_feed_payload(entities: list[dict[str, Any]]) -> bytes:
+    """Serialise a minimal GTFS-RT FeedMessage as protobuf bytes.
 
     Args:
         entities: List of entity dicts to embed under the ``entity`` key.
 
     Returns:
-        JSON string representing the FeedMessage.
+        Protobuf-encoded bytes representing the FeedMessage.
     """
-    return json.dumps({"header": {}, "entity": entities})
+    feed = json_format.ParseDict(
+        {"header": {"gtfs_realtime_version": "2.0"}, "entity": entities},
+        gtfs_realtime_pb2.FeedMessage(),
+    )
+    return feed.SerializeToString()
 
 
 def _minimal_entity(
@@ -48,8 +54,8 @@ def _minimal_entity(
     Args:
         trip_id: GTFS trip identifier.
         route_id: GTFS route identifier.
-        direction_id: Direction integer, or ``None`` to omit the key.
-        start_date: Start date string, or ``None`` to omit the key.
+        direction_id: Direction integer, or ``None`` to omit the field.
+        start_date: Start date string, or ``None`` to omit the field.
         stop_time_updates: List of raw stop-time-update dicts.
 
     Returns:
@@ -72,17 +78,17 @@ def _minimal_entity(
 
 def _make_mock_response(
     status: int,
-    body: str,
+    body: bytes,
 ) -> MagicMock:
     """Return a mock aiohttp response usable as an async context manager.
 
     The returned mock is configured so that ``async with session.get(...) as
-    resp:`` yields an object with the given ``status`` and ``await resp.text()``
+    resp:`` yields an object with the given ``status`` and ``await resp.read()``
     returning ``body``.
 
     Args:
         status: HTTP status code.
-        body: Response body text.
+        body: Response body bytes.
 
     Returns:
         ``MagicMock`` configured to behave like an ``aiohttp.ClientResponse``
@@ -90,7 +96,7 @@ def _make_mock_response(
     """
     resp = MagicMock()
     resp.status = status
-    resp.text = AsyncMock(return_value=body)
+    resp.read = AsyncMock(return_value=body)
 
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=resp)
@@ -100,13 +106,13 @@ def _make_mock_response(
 
 def _make_client_with_mock_response(
     status: int,
-    body: str,
+    body: bytes,
 ) -> tuple[GtfsRtClient, MagicMock]:
     """Construct a ``GtfsRtClient`` backed by a mock session returning ``body``.
 
     Args:
         status: HTTP status code the mock session will return.
-        body: Response body text the mock session will return.
+        body: Response body bytes the mock session will return.
 
     Returns:
         A ``(client, session_mock)`` tuple.
@@ -136,7 +142,7 @@ def _make_client_raising_client_error(exc: aiohttp.ClientError) -> GtfsRtClient:
 
 # ---------------------------------------------------------------------------
 # Test 1 — Valid feed returns populated TripUpdate list
-# AC: Given a valid JSON feed, async_fetch_trip_updates returns TripUpdate
+# AC: Given a valid protobuf feed, async_fetch_trip_updates returns TripUpdate
 #     objects with all fields correctly populated.
 # ---------------------------------------------------------------------------
 
@@ -209,13 +215,7 @@ async def test_valid_feed_sends_x_api_key_header() -> None:
 async def test_missing_optional_direction_id_and_start_date_are_none() -> None:
     """direction_id and start_date are None when absent from the feed entity."""
     # Arrange — build entity with no direction_id and no start_date in trip
-    entity: dict[str, Any] = {
-        "id": "1",
-        "trip_update": {
-            "trip": {"trip_id": "TRIP-2", "route_id": "ROUTE-B"},
-            "stop_time_update": [],
-        },
-    }
+    entity = _minimal_entity(trip_id="TRIP-2", direction_id=None, start_date=None)
     body = _make_feed_payload([entity])
     client, _ = _make_client_with_mock_response(200, body)
 
@@ -249,23 +249,11 @@ async def test_missing_stop_time_update_optional_fields_are_none() -> None:
     assert stu.departure_time is None
 
 
-# ---------------------------------------------------------------------------
-# Test 3 — Non-castable numeric field → None
-# AC: A delay/timestamp that cannot be cast to int is stored as None.
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_non_castable_numeric_field_stored_as_none() -> None:
-    """A delay value of 'not-a-number' is stored as None rather than raising."""
-    # Arrange
-    stu_raw: list[dict[str, Any]] = [
-        {
-            "stop_id": "STOP-X",
-            "arrival": {"delay": "not-a-number", "time": "also-bad"},
-            "departure": {"delay": None, "time": "bad-time"},
-        }
-    ]
+async def test_empty_arrival_block_yields_none_delay_and_time() -> None:
+    """An arrival block present but with no delay/time fields yields None values."""
+    # Arrange — arrival block set but empty; departure absent entirely
+    stu_raw: list[dict[str, Any]] = [{"stop_id": "STOP-X", "arrival": {}}]
     entity = _minimal_entity(stop_time_updates=stu_raw)
     body = _make_feed_payload([entity])
     client, _ = _make_client_with_mock_response(200, body)
@@ -282,14 +270,14 @@ async def test_non_castable_numeric_field_stored_as_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 4 — Empty entity array → []
+# Test 3 — Empty entity array → []
 # AC: Feed with an empty entity array returns an empty list without error.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_empty_entity_array_returns_empty_list() -> None:
-    """A feed with entity: [] returns [] without raising GtfsRtParseError."""
+    """A feed with no entities returns [] without raising GtfsRtParseError."""
     # Arrange
     body = _make_feed_payload([])
     client, _ = _make_client_with_mock_response(200, body)
@@ -303,9 +291,9 @@ async def test_empty_entity_array_returns_empty_list() -> None:
 
 @pytest.mark.asyncio
 async def test_entity_with_no_trip_update_block_is_skipped() -> None:
-    """An entity dict that lacks a trip_update key is silently skipped."""
+    """An entity that lacks a trip_update block is silently skipped."""
     # Arrange
-    body = json.dumps({"entity": [{"id": "1"}]})
+    body = _make_feed_payload([{"id": "1"}])
     client, _ = _make_client_with_mock_response(200, body)
 
     # Act
@@ -316,7 +304,7 @@ async def test_entity_with_no_trip_update_block_is_skipped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — HTTP 401 → GtfsRtAuthError
+# Test 4 — HTTP 401 → GtfsRtAuthError
 # ---------------------------------------------------------------------------
 
 
@@ -324,7 +312,7 @@ async def test_entity_with_no_trip_update_block_is_skipped() -> None:
 async def test_http_401_raises_gtfs_rt_auth_error() -> None:
     """A 401 response raises GtfsRtAuthError."""
     # Arrange
-    client, _ = _make_client_with_mock_response(401, "Unauthorized")
+    client, _ = _make_client_with_mock_response(401, b"Unauthorized")
 
     # Act / Assert
     with pytest.raises(GtfsRtAuthError):
@@ -332,7 +320,7 @@ async def test_http_401_raises_gtfs_rt_auth_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — HTTP 500 → GtfsRtFetchError
+# Test 5 — HTTP 500 → GtfsRtFetchError
 # ---------------------------------------------------------------------------
 
 
@@ -340,7 +328,7 @@ async def test_http_401_raises_gtfs_rt_auth_error() -> None:
 async def test_http_500_raises_gtfs_rt_fetch_error() -> None:
     """A 500 response raises GtfsRtFetchError."""
     # Arrange
-    client, _ = _make_client_with_mock_response(500, "Internal Server Error")
+    client, _ = _make_client_with_mock_response(500, b"Internal Server Error")
 
     # Act / Assert
     with pytest.raises(GtfsRtFetchError):
@@ -351,7 +339,7 @@ async def test_http_500_raises_gtfs_rt_fetch_error() -> None:
 async def test_http_403_raises_gtfs_rt_fetch_error() -> None:
     """A non-401 4xx response (403) raises GtfsRtFetchError, not GtfsRtAuthError."""
     # Arrange
-    client, _ = _make_client_with_mock_response(403, "Forbidden")
+    client, _ = _make_client_with_mock_response(403, b"Forbidden")
 
     # Act / Assert
     with pytest.raises(GtfsRtFetchError):
@@ -359,7 +347,7 @@ async def test_http_403_raises_gtfs_rt_fetch_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 7 — aiohttp.ClientError → GtfsRtFetchError
+# Test 6 — aiohttp.ClientError → GtfsRtFetchError
 # ---------------------------------------------------------------------------
 
 
@@ -391,31 +379,15 @@ async def test_aiohttp_client_error_chains_original_exception() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 8 — Non-JSON response body → GtfsRtParseError
+# Test 7 — Non-protobuf response body → GtfsRtParseError
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_invalid_json_body_raises_gtfs_rt_parse_error() -> None:
-    """A response body that is not valid JSON raises GtfsRtParseError."""
+async def test_non_protobuf_body_raises_gtfs_rt_parse_error() -> None:
+    """A response body that is not a protobuf FeedMessage raises GtfsRtParseError."""
     # Arrange
-    client, _ = _make_client_with_mock_response(200, "this is not json }{")
-
-    # Act / Assert
-    with pytest.raises(GtfsRtParseError):
-        await client.async_fetch_trip_updates()
-
-
-# ---------------------------------------------------------------------------
-# Test 9 — Valid JSON but top-level is not a dict → GtfsRtParseError
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_json_array_at_top_level_raises_gtfs_rt_parse_error() -> None:
-    """Valid JSON that is a list at the top level raises GtfsRtParseError."""
-    # Arrange
-    client, _ = _make_client_with_mock_response(200, json.dumps([1, 2, 3]))
+    client, _ = _make_client_with_mock_response(200, b"this is not protobuf }{")
 
     # Act / Assert
     with pytest.raises(GtfsRtParseError):
@@ -423,10 +395,23 @@ async def test_json_array_at_top_level_raises_gtfs_rt_parse_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_json_string_at_top_level_raises_gtfs_rt_parse_error() -> None:
-    """Valid JSON that is a bare string at the top level raises GtfsRtParseError."""
+async def test_json_body_raises_gtfs_rt_parse_error() -> None:
+    """A JSON body (e.g. from a ?format=json endpoint) raises GtfsRtParseError."""
     # Arrange
-    client, _ = _make_client_with_mock_response(200, json.dumps("just a string"))
+    body = b'{"header": {"gtfs_realtime_version": "2.0"}, "entity": []}'
+    client, _ = _make_client_with_mock_response(200, body)
+
+    # Act / Assert
+    with pytest.raises(GtfsRtParseError):
+        await client.async_fetch_trip_updates()
+
+
+@pytest.mark.asyncio
+async def test_truncated_protobuf_body_raises_gtfs_rt_parse_error() -> None:
+    """A truncated protobuf FeedMessage raises GtfsRtParseError."""
+    # Arrange — serialise a valid feed, then cut it mid-message
+    body = _make_feed_payload([_minimal_entity()])
+    client, _ = _make_client_with_mock_response(200, body[: len(body) // 2])
 
     # Act / Assert
     with pytest.raises(GtfsRtParseError):
@@ -434,7 +419,7 @@ async def test_json_string_at_top_level_raises_gtfs_rt_parse_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 10 — Library importable without homeassistant installed
+# Test 8 — Library importable without homeassistant installed
 # AC: nta_gtfs is importable in an environment where homeassistant is absent.
 # ---------------------------------------------------------------------------
 

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from typing import Any
 
 import aiohttp
+from google.protobuf.message import DecodeError, Message
+from google.transit import gtfs_realtime_pb2
 
 from nta_gtfs.exceptions import GtfsRtAuthError, GtfsRtFetchError, GtfsRtParseError
 
@@ -52,30 +52,31 @@ class TripUpdate:
     stop_time_updates: list[StopTimeUpdate] = field(default_factory=list)
 
 
-def _int_or_none(value: Any) -> int | None:
-    """Convert a value to ``int``, returning ``None`` when conversion fails.
+def _optional_int(message: Message | None, field_name: str) -> int | None:
+    """Read an optional integer field from a protobuf message.
 
     Args:
-        value: Any value that may be cast to ``int``.
+        message: Protobuf message to read from, or ``None`` when the enclosing
+            block is absent.
+        field_name: Name of the optional scalar field.
 
     Returns:
-        Integer representation of ``value``, or ``None`` if ``value`` is
-        ``None`` or cannot be cast.
+        The field value as ``int``, or ``None`` when ``message`` is ``None``
+        or the field is not set.
     """
-    if value is None:
+    if message is None or not message.HasField(field_name):
         return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    return int(getattr(message, field_name))
 
 
 class GtfsRtClient:
-    """Async client for fetching real-time trip updates from a GTFS-RT JSON feed.
+    """Async client for fetching real-time trip updates from a GTFS-RT feed.
 
-    Accepts a caller-supplied ``aiohttp.ClientSession`` and does not create
-    its own session.  All errors are raised as library exceptions; no logging
-    is performed internally.
+    The feed is expected to be a protobuf-encoded GTFS-RT ``FeedMessage``
+    (the NTA endpoint's default response format).  Accepts a caller-supplied
+    ``aiohttp.ClientSession`` and does not create its own session.  All
+    errors are raised as library exceptions; no logging is performed
+    internally.
     """
 
     def __init__(
@@ -87,7 +88,7 @@ class GtfsRtClient:
         """Initialise the client.
 
         Args:
-            feed_url: Full HTTPS URL of the GTFS-RT JSON feed endpoint.  Must
+            feed_url: Full HTTPS URL of the GTFS-RT feed endpoint.  Must
                 use the ``https://`` scheme to protect the API key in transit.
             api_key: API key sent as the ``x-api-key`` request header.
             session: Caller-managed ``aiohttp.ClientSession`` used for all requests.
@@ -115,8 +116,8 @@ class GtfsRtClient:
         """Fetch and parse the GTFS-RT trip updates feed.
 
         Performs an HTTP GET to the configured ``feed_url`` with the
-        ``x-api-key`` header, parses the JSON FeedMessage, and returns a list
-        of ``TripUpdate`` objects.
+        ``x-api-key`` header, parses the protobuf ``FeedMessage`` body, and
+        returns a list of ``TripUpdate`` objects.
 
         Returns:
             List of ``TripUpdate`` objects parsed from the feed.  Returns an
@@ -126,8 +127,8 @@ class GtfsRtClient:
             GtfsRtAuthError: The feed returns HTTP 401.
             GtfsRtFetchError: The feed returns any other HTTP 4xx or 5xx
                 status, or an ``aiohttp.ClientError`` occurs.
-            GtfsRtParseError: The response body is not valid JSON or the
-                top-level structure is not a dict.
+            GtfsRtParseError: The response body is not a valid protobuf
+                ``FeedMessage``.
         """
         try:
             async with self._session.get(
@@ -139,69 +140,70 @@ class GtfsRtClient:
                 if resp.status >= 400:
                     raise GtfsRtFetchError(f"HTTP {resp.status}")
 
-                raw = await resp.text()
+                raw = await resp.read()
 
         except (GtfsRtAuthError, GtfsRtFetchError):
             raise
         except aiohttp.ClientError as exc:
             raise GtfsRtFetchError(str(exc)) from exc
 
+        feed = gtfs_realtime_pb2.FeedMessage()
         try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise GtfsRtParseError(f"Invalid JSON: {exc}") from exc
+            feed.ParseFromString(raw)
+        except DecodeError as exc:
+            raise GtfsRtParseError(f"Invalid protobuf FeedMessage: {exc}") from exc
 
-        if not isinstance(payload, dict):
-            raise GtfsRtParseError("Expected a JSON object at the top level")
-
-        return self._parse_feed(payload)
+        return self._parse_feed(feed)
 
     @staticmethod
-    def _parse_feed(payload: dict[str, Any]) -> list[TripUpdate]:
-        """Parse a GTFS-RT FeedMessage dict into a list of ``TripUpdate`` objects.
+    def _parse_feed(feed: gtfs_realtime_pb2.FeedMessage) -> list[TripUpdate]:
+        """Parse a GTFS-RT ``FeedMessage`` into a list of ``TripUpdate`` objects.
 
-        Iterates over the ``entity`` array in ``payload``, extracts each
-        ``trip_update`` block, and normalises it into typed dataclass instances.
-        Missing optional keys are replaced with ``None`` rather than raising.
+        Iterates over the ``entity`` entries in ``feed``, extracts each
+        ``trip_update`` block, and normalises it into typed dataclass
+        instances.  Unset optional fields are replaced with ``None`` rather
+        than raising.
 
         Args:
-            payload: Parsed JSON object representing the GTFS-RT FeedMessage.
+            feed: Decoded protobuf ``FeedMessage``.
 
         Returns:
             List of ``TripUpdate`` instances parsed from the feed entities.
         """
         updates: list[TripUpdate] = []
 
-        for entity in payload.get("entity", []):
-            trip_update = entity.get("trip_update")
-            if trip_update is None:
+        for entity in feed.entity:
+            if not entity.HasField("trip_update"):
                 continue
-
-            trip = trip_update.get("trip", {})
-            raw_direction = trip.get("direction_id")
+            trip_update = entity.trip_update
+            trip = trip_update.trip
 
             stop_time_updates: list[StopTimeUpdate] = []
-            for stu in trip_update.get("stop_time_update", []):
-                arrival = stu.get("arrival") or {}
-                departure = stu.get("departure") or {}
+            for stu in trip_update.stop_time_update:
+                arrival = stu.arrival if stu.HasField("arrival") else None
+                departure = stu.departure if stu.HasField("departure") else None
                 stop_time_updates.append(
                     StopTimeUpdate(
-                        stop_id=str(stu.get("stop_id", "")),
-                        arrival_delay=_int_or_none(arrival.get("delay")),
-                        departure_delay=_int_or_none(departure.get("delay")),
-                        arrival_time=_int_or_none(arrival.get("time")),
-                        departure_time=_int_or_none(departure.get("time")),
+                        stop_id=stu.stop_id,
+                        arrival_delay=_optional_int(arrival, "delay"),
+                        departure_delay=_optional_int(departure, "delay"),
+                        arrival_time=_optional_int(arrival, "time"),
+                        departure_time=_optional_int(departure, "time"),
                     )
                 )
 
             updates.append(
                 TripUpdate(
-                    trip_id=str(trip.get("trip_id", "")),
-                    route_id=str(trip.get("route_id", "")),
+                    trip_id=trip.trip_id,
+                    route_id=trip.route_id,
                     direction_id=(
-                        str(raw_direction) if raw_direction is not None else None
+                        str(trip.direction_id)
+                        if trip.HasField("direction_id")
+                        else None
                     ),
-                    start_date=trip.get("start_date"),
+                    start_date=(
+                        trip.start_date if trip.HasField("start_date") else None
+                    ),
                     stop_time_updates=stop_time_updates,
                 )
             )
