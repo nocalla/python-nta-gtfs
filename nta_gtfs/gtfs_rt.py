@@ -77,6 +77,11 @@ class GtfsRtClient:
     ``aiohttp.ClientSession`` and does not create its own session.  All
     errors are raised as library exceptions; no logging is performed
     internally.
+
+    The client does not throttle requests.  The NTA fair usage policy
+    (https://developer.nationaltransport.ie/usagepolicy) limits each API
+    token to one GTFS-RT request every 60 seconds; callers are responsible
+    for keeping their polling cadence within that limit.
     """
 
     def __init__(
@@ -118,6 +123,9 @@ class GtfsRtClient:
         Performs an HTTP GET to the configured ``feed_url`` with the
         ``x-api-key`` header, parses the protobuf ``FeedMessage`` body, and
         returns a list of ``TripUpdate`` objects.
+
+        The NTA fair usage policy allows one request every 60 seconds per
+        API token; do not call this method more frequently than that.
 
         Returns:
             List of ``TripUpdate`` objects parsed from the feed.  Returns an

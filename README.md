@@ -129,6 +129,31 @@ Named tuple representing a single scheduled departure.
 | `departure_time` | `str` | Scheduled departure time in `HH:MM` format. |
 | `route_name` | `str \| None` | Route short name. |
 
+## Data licence, attribution and fair usage
+
+The GTFS data served by these feeds is provided by the
+[National Transport Authority (NTA)](https://www.nationaltransport.ie/) under the
+[Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/)
+licence, subject to the
+[NTA GTFS fair usage policy](https://developer.nationaltransport.ie/usagepolicy).
+This library's MIT licence covers the code only, not the data.
+
+If you use this library in a public-facing application, presentation, or
+publication, the policy requires you to:
+
+- credit the NTA as the data provider,
+- link to the GTFS data source or the [NTA website](https://www.nationaltransport.ie/), and
+- state that the GTFS data is provided "as is" and that the NTA is not
+  responsible for any errors or inaccuracies in it.
+
+The policy also limits each API token to **one GTFS-RT request every 60
+seconds**. This library does not throttle requests itself — the polling
+cadence is yours to control — so make sure your application calls
+`async_fetch_trip_updates` no more than once per 60 seconds per token. The
+static GTFS zip changes infrequently; the default `refresh_hours=24` is well
+within fair usage, and you should avoid re-downloading it more often than
+needed.
+
 ## Requirements
 
 - Python 3.12 or later
