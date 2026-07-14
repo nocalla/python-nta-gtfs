@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.3.0] - 2026-07-14
+
+### Added
+
+- `StaticGtfsClient.has_scheduled_pair(stop_id, route_id) -> bool`, for
+  distinguishing a stop/route pair that will never appear in the static
+  schedule from one that is correctly configured but has no departures due
+  right now. Checks presence of the `(stop_id, route_id)` key in the
+  departure index only — no calendar, direction, or operator filtering (#25)
+
 ## [0.2.1] - 2026-07-14
 
 ### Fixed

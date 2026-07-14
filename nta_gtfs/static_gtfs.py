@@ -276,6 +276,29 @@ class StaticGtfsClient:
         results.sort(key=lambda t: t.departure_time)
         return results
 
+    def has_scheduled_pair(self, stop_id: str, route_id: str) -> bool:
+        """Check whether a stop/route pair exists anywhere in the schedule.
+
+        Checks only for presence of the ``(stop_id, route_id)`` key in the
+        pre-built departure index — it does not consider calendar service
+        activity, direction, or operator. A pair that matches here may still
+        yield no departures on a given date, or under a given direction or
+        operator filter; that is a narrower, separate failure mode from an
+        unmatchable pair. Intended for diagnosing sensors configured with a
+        stop/route combination that will never produce a departure.
+
+        Args:
+            stop_id: GTFS stop ID to check.
+            route_id: Real GTFS route ID (e.g. ``"2 220 c b"``) to check.
+
+        Returns:
+            ``True`` if the pair is a key in the departure index, ``False``
+            otherwise or when ``available`` is ``False``.
+        """
+        if not self._available:
+            return False
+        return (stop_id, route_id) in self._departure_index
+
 
 def _parse_zip(
     fileobj: IO[bytes],

@@ -1171,3 +1171,50 @@ async def test_route_id_none_unknown_stop_returns_empty() -> None:
     )
 
     assert results == []
+
+
+# ===========================================================================
+# has_scheduled_pair (issue #25)
+# ===========================================================================
+
+
+async def test_has_scheduled_pair_returns_true_for_indexed_pair() -> None:
+    """A (stop_id, route_id) present in the departure index returns True."""
+    zip_bytes = _make_gtfs_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    assert client.has_scheduled_pair(_STOP_A, _ROUTE_46A) is True
+
+
+async def test_has_scheduled_pair_ignores_calendar_direction_and_operator() -> None:
+    """True even if no service runs today or direction/operator would exclude it."""
+    zip_bytes = _make_gtfs_zip(weekday_flags="0,0,0,0,0,0,0")
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    assert (
+        client.get_scheduled_departures(_STOP_A, _ROUTE_46A, None, None, _MONDAY) == []
+    )
+    assert client.has_scheduled_pair(_STOP_A, _ROUTE_46A) is True
+
+
+async def test_has_scheduled_pair_returns_false_for_absent_pair() -> None:
+    """A (stop_id, route_id) not in the departure index returns False."""
+    zip_bytes = _make_gtfs_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    assert client.has_scheduled_pair(_STOP_A, _ROUTE_39A) is False
+    assert client.has_scheduled_pair("STOP_NOT_IN_DATA", _ROUTE_46A) is False
+
+
+async def test_has_scheduled_pair_returns_false_when_unloaded() -> None:
+    """An unloaded client (available=False) returns False regardless of pair."""
+    session = _make_session(status=200, body=b"")
+    client = StaticGtfsClient(_DUMMY_URL, session)
+
+    assert client.has_scheduled_pair(_STOP_A, _ROUTE_46A) is False
