@@ -14,6 +14,7 @@ from nta_gtfs.exceptions import (
     NtaGtfsError,
     StaticGtfsLoadError,
 )
+from nta_gtfs.gtfs_picker import Route, StaticGtfsPickerClient, Stop
 from nta_gtfs.gtfs_rt import GtfsRtClient, StopTimeUpdate, TripUpdate
 from nta_gtfs.static_gtfs import ScheduledDeparture, StaticGtfsClient
 
@@ -23,9 +24,12 @@ __all__ = [
     "GtfsRtFetchError",
     "GtfsRtParseError",
     "NtaGtfsError",
+    "Route",
     "ScheduledDeparture",
     "StaticGtfsClient",
     "StaticGtfsLoadError",
+    "StaticGtfsPickerClient",
+    "Stop",
     "StopTimeUpdate",
     "TripUpdate",
     "__version__",

@@ -1,19 +1,15 @@
 """Static GTFS schedule client for the nta_gtfs library."""
 
 import asyncio
-import csv
-import io
-import tempfile
 import zipfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from typing import IO, NamedTuple
 
 import aiohttp
 
+from nta_gtfs._streaming import download_zip_to_tempfile, iter_csv
 from nta_gtfs.exceptions import StaticGtfsLoadError
-
-_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 
 _WEEKDAY_COLUMNS = [
     "monday",
@@ -162,38 +158,10 @@ class StaticGtfsClient:
         Raises:
             StaticGtfsLoadError: On any download or parse failure.
         """
-        tmp = await asyncio.to_thread(tempfile.TemporaryFile)
+        tmp = await download_zip_to_tempfile(
+            self._url, self._session, self._max_download_bytes
+        )
         try:
-            try:
-                async with self._session.get(self._url) as resp:
-                    if not resp.ok:
-                        raise StaticGtfsLoadError(
-                            f"Static GTFS download failed: HTTP {resp.status}"
-                            f" from {self._url}"
-                        )
-                    content_length = resp.content_length
-                    if (
-                        content_length is not None
-                        and content_length > self._max_download_bytes
-                    ):
-                        raise StaticGtfsLoadError(
-                            f"Static GTFS response too large: {content_length} bytes "
-                            f"exceeds limit of {self._max_download_bytes} bytes"
-                        )
-                    received = 0
-                    async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
-                        received += len(chunk)
-                        if received > self._max_download_bytes:
-                            raise StaticGtfsLoadError(
-                                f"Static GTFS response too large: {received} bytes "
-                                f"exceeds limit of {self._max_download_bytes} bytes"
-                            )
-                        await asyncio.to_thread(tmp.write, chunk)
-            except aiohttp.ClientError as exc:
-                raise StaticGtfsLoadError(
-                    f"Static GTFS download error for {self._url}: {exc}"
-                ) from exc
-
             try:
                 (
                     trip_service_ids,
@@ -233,12 +201,12 @@ class StaticGtfsClient:
     def get_scheduled_departures(
         self,
         stop_id: str,
-        route_id: str,
+        route_id: str | None,
         direction_id: int | None,
         operator_id: str | None,
         target_date: date,
     ) -> list[ScheduledDeparture]:
-        """Return scheduled departures for a stop/route on a given date.
+        """Return scheduled departures for a stop on a given date.
 
         Looks up the pre-built departure index by ``(stop_id, route_id)`` and
         filters by active service IDs, optional direction, and optional
@@ -248,7 +216,9 @@ class StaticGtfsClient:
             stop_id: GTFS stop ID to filter on.
             route_id: Real GTFS route ID (e.g. ``"2 220 c b"``) matched
                 against ``routes.route_id`` — the same identifier used by
-                GTFS-RT ``TripDescriptor.route_id``.
+                GTFS-RT ``TripDescriptor.route_id``.  ``None`` skips route
+                filtering, merging departures across every route serving
+                ``stop_id`` (for stop-wide monitoring).
             direction_id: GTFS direction filter (``0`` or ``1``); ``None``
                 means no direction filter is applied.
             operator_id: GTFS agency ID to filter on; ``None`` means no
@@ -269,7 +239,15 @@ class StaticGtfsClient:
         if not active_services:
             return []
 
-        candidates = self._departure_index.get((stop_id, route_id), [])
+        if route_id is None:
+            candidates = [
+                candidate
+                for key, candidates_for_key in self._departure_index.items()
+                if key[0] == stop_id
+                for candidate in candidates_for_key
+            ]
+        else:
+            candidates = self._departure_index.get((stop_id, route_id), [])
         if not candidates:
             return []
 
@@ -297,21 +275,6 @@ class StaticGtfsClient:
 
         results.sort(key=lambda t: t.departure_time)
         return results
-
-
-def _iter_csv(zf: zipfile.ZipFile, filename: str) -> Iterator[dict[str, str]]:
-    """Stream a CSV file from an open zip one row dict at a time.
-
-    Args:
-        zf: Open zip archive to read from.
-        filename: Name of the file inside the zip archive.
-
-    Yields:
-        Row dicts with string values; BOM-stripped headers.
-    """
-    with zf.open(filename) as fh:
-        text = io.TextIOWrapper(fh, encoding="utf-8-sig")
-        yield from csv.DictReader(text)
 
 
 def _parse_zip(
@@ -349,7 +312,7 @@ def _parse_zip(
 
         # route_id -> (route_short_name, agency_id or None); parse-time only.
         routes_by_id: dict[str, tuple[str, str | None]] = {}
-        for row in _iter_csv(zf, "routes.txt"):
+        for row in iter_csv(zf, "routes.txt"):
             route_id = row.get("route_id")
             if route_id is None:
                 continue
@@ -362,7 +325,7 @@ def _parse_zip(
         # Trips pre-joined against routes so the routes dict can be dropped
         # and stop_times needs a single lookup per row.
         trips_by_id: dict[str, _TripInfo] = {}
-        for row in _iter_csv(zf, "trips.txt"):
+        for row in iter_csv(zf, "trips.txt"):
             trip_id = row.get("trip_id")
             if trip_id is None:
                 continue
@@ -383,7 +346,7 @@ def _parse_zip(
             tuple[str, str], list[tuple[str, str, str, str | None, str]]
         ] = {}
 
-        for st_row in _iter_csv(zf, "stop_times.txt"):
+        for st_row in iter_csv(zf, "stop_times.txt"):
             stop_id = st_row.get("stop_id", "")
             if stop_filter is not None and stop_id not in stop_filter:
                 continue
@@ -411,9 +374,9 @@ def _parse_zip(
         }
         del trips_by_id
 
-        calendar_rows = list(_iter_csv(zf, "calendar.txt"))
+        calendar_rows = list(iter_csv(zf, "calendar.txt"))
         calendar_dates_rows = (
-            list(_iter_csv(zf, "calendar_dates.txt"))
+            list(iter_csv(zf, "calendar_dates.txt"))
             if "calendar_dates.txt" in names
             else []
         )

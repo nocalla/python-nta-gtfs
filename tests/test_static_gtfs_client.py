@@ -1112,3 +1112,62 @@ async def test_shared_route_short_name_does_not_conflate_route_ids() -> None:
     assert {r.trip_id for r in cork_results} == {"T_CORK"}
     assert {r.trip_id for r in dublin_results} == {"T_DUBLIN"}
     assert unknown_results == []
+
+
+# ===========================================================================
+# route_id=None returns merged departures across all routes (issue #26)
+# ===========================================================================
+
+
+async def test_route_id_none_merges_departures_across_routes() -> None:
+    """route_id=None returns departures from every route serving the stop."""
+    zip_bytes = _make_cork_dublin_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    results = client.get_scheduled_departures(_STOP_A, None, None, None, _MONDAY)
+
+    assert {r.trip_id for r in results} == {"T_CORK", "T_DUBLIN"}
+
+
+async def test_route_id_none_still_sorted_by_departure_time() -> None:
+    """route_id=None merges routes but keeps ascending departure_time order."""
+    zip_bytes = _make_cork_dublin_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    results = client.get_scheduled_departures(_STOP_A, None, None, None, _MONDAY)
+
+    times = [r.departure_time for r in results]
+    assert times == sorted(times)
+    assert [r.trip_id for r in results] == ["T_CORK", "T_DUBLIN"]
+
+
+async def test_route_id_none_respects_direction_and_operator_filters() -> None:
+    """route_id=None still honours direction_id and operator_id filters."""
+    zip_bytes = _make_two_agency_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    bus_only = client.get_scheduled_departures(
+        _STOP_A, None, None, _AGENCY_BUS, _MONDAY
+    )
+
+    assert {r.trip_id for r in bus_only} == {"T_BUS"}
+
+
+async def test_route_id_none_unknown_stop_returns_empty() -> None:
+    """route_id=None for a stop with no departures returns []."""
+    zip_bytes = _make_gtfs_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    results = client.get_scheduled_departures(
+        "STOP_NOT_IN_DATA", None, None, None, _MONDAY
+    )
+
+    assert results == []
