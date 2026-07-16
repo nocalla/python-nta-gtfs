@@ -313,6 +313,128 @@ async def test_async_get_routes_for_stop_does_not_redownload() -> None:
 
 
 # ===========================================================================
+# async_get_termini
+# ===========================================================================
+
+
+def _make_termini_zip() -> bytes:
+    """Build a GTFS zip for terminus-lookup tests.
+
+    Stop S1 is served by route R1 in both directions, with two branches in
+    direction 0 (trips T1/T2 ending at different termini, S3 and S4) and one
+    trip in direction 1 (T3, ending at S1 itself). Route R2 also calls at S1
+    (trip T4, direction 0, ending at S5) to exercise the combined-routes
+    (``route_id=None``) case and the single-route filter against it.
+
+    Returns:
+        Raw bytes of the assembled GTFS zip archive.
+    """
+    stops_csv = (
+        "stop_id,stop_code,stop_name\n"
+        "S1,S1CODE,Stop One\n"
+        "S3,S3CODE,Terminus Three\n"
+        "S4,S4CODE,Terminus Four\n"
+        "S5,S5CODE,Terminus Five\n"
+    )
+    routes_csv = "route_id,route_short_name,agency_id\nR1,46A,BUS_CO\nR2,39A,BUS_CO\n"
+    trips_csv = "trip_id,route_id,direction_id\nT1,R1,0\nT2,R1,0\nT3,R1,1\nT4,R2,0\n"
+    stop_times_csv = (
+        "trip_id,stop_id,stop_sequence\n"
+        "T1,S1,1\n"
+        "T1,S3,2\n"
+        "T2,S1,1\n"
+        "T2,S4,2\n"
+        "T3,S4,1\n"
+        "T3,S1,2\n"
+        "T4,S1,1\n"
+        "T4,S5,2\n"
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("stops.txt", stops_csv)
+        zf.writestr("routes.txt", routes_csv)
+        zf.writestr("trips.txt", trips_csv)
+        zf.writestr("stop_times.txt", stop_times_csv)
+    return buf.getvalue()
+
+
+async def test_async_get_termini_returns_distinct_branch_termini() -> None:
+    """Two branches of the same route/direction return both terminus names."""
+    zip_bytes = _make_termini_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsPickerClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    termini = await client.async_get_termini("S1", "R1", 0)
+
+    assert termini == ["Terminus Four", "Terminus Three"]
+
+
+async def test_async_get_termini_filters_by_direction() -> None:
+    """The opposite direction resolves to its own, different terminus."""
+    zip_bytes = _make_termini_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsPickerClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    termini = await client.async_get_termini("S1", "R1", 1)
+
+    assert termini == ["Stop One"]
+
+
+async def test_async_get_termini_none_route_combines_all_routes() -> None:
+    """route_id=None merges termini across every route serving the stop."""
+    zip_bytes = _make_termini_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsPickerClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    termini = await client.async_get_termini("S1", None, 0)
+
+    assert termini == ["Terminus Five", "Terminus Four", "Terminus Three"]
+
+
+async def test_async_get_termini_unmatched_route_returns_empty() -> None:
+    """A route_id with no matching trips at the stop returns []."""
+    zip_bytes = _make_termini_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsPickerClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    termini = await client.async_get_termini("S1", "R2", 1)
+
+    assert termini == []
+
+
+async def test_async_get_termini_before_load_raises() -> None:
+    """async_get_termini before async_load raises StaticGtfsLoadError."""
+    session = _make_session(status=200, body=b"irrelevant")
+    client = StaticGtfsPickerClient(_DUMMY_URL, session)
+
+    with pytest.raises(StaticGtfsLoadError):
+        await client.async_get_termini("S1", "R1", 0)
+
+
+async def test_async_get_termini_missing_stop_times_raises_load_error() -> None:
+    """A cached archive missing stop_times.txt surfaces StaticGtfsLoadError."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr("stops.txt", "stop_id,stop_code,stop_name\nS1,S1CODE,Stop One\n")
+        zf.writestr(
+            "routes.txt", "route_id,route_short_name,agency_id\nR1,46A,BUS_CO\n"
+        )
+    zip_bytes = buf.getvalue()
+
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsPickerClient(_DUMMY_URL, session)
+    await client.async_load()
+
+    with pytest.raises(StaticGtfsLoadError):
+        await client.async_get_termini("S1", "R1", 0)
+
+
+# ===========================================================================
 # async_close
 # ===========================================================================
 
