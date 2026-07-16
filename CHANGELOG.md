@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.5.0] - 2026-07-16
+
+### Added
+
+- `StaticGtfsClient.get_trip_stops(trip_id) -> list[tuple[int, str]]`, returning
+  a trip's full stop pattern ordered by `stop_sequence`. Needed to carry
+  forward the nearest preceding RT delay when a GTFS-RT feed omits an exact
+  stop match for a tracked trip (ha-tfi-live#119, ha-tfi-live#127) (#27)
+
 ## [0.4.0] - 2026-07-16
 
 ### Added
