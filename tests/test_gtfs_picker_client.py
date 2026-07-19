@@ -6,12 +6,13 @@ made; the client itself spools downloads to an anonymous temporary file.
 
 import io
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
 
+from nta_gtfs import gtfs_picker
 from nta_gtfs.exceptions import StaticGtfsLoadError
 from nta_gtfs.gtfs_picker import Route, StaticGtfsPickerClient, Stop
 
@@ -110,6 +111,42 @@ def _make_session(*, status: int = 200, body: bytes = b"") -> MagicMock:
         )
     )
     return mock_session
+
+
+def _make_counting_iter_csv(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Patch ``gtfs_picker.iter_csv`` to count invocations per filename.
+
+    Delegates to the real implementation underneath, so parsing behavior is
+    unchanged; only call counts are observed.
+
+    Args:
+        monkeypatch: pytest fixture used to patch and auto-restore the
+            module-level ``iter_csv`` reference.
+
+    Returns:
+        Dict mapping filename to call count, updated live as the patched
+        ``iter_csv`` is called.
+    """
+    counts: dict[str, int] = {}
+    real_iter_csv = gtfs_picker.iter_csv
+
+    def _counting_iter_csv(
+        zf: zipfile.ZipFile, filename: str
+    ) -> Iterator[dict[str, str]]:
+        """Delegate to the real iter_csv while recording a call count.
+
+        Args:
+            zf: Open zip file to read the CSV member from.
+            filename: Name of the CSV member within the zip.
+
+        Yields:
+            Row dicts with string values, as returned by the real iter_csv.
+        """
+        counts[filename] = counts.get(filename, 0) + 1
+        yield from real_iter_csv(zf, filename)
+
+    monkeypatch.setattr(gtfs_picker, "iter_csv", _counting_iter_csv)
+    return counts
 
 
 # ===========================================================================
@@ -437,6 +474,48 @@ async def test_async_get_termini_missing_stop_times_raises_load_error() -> None:
 # ===========================================================================
 # async_close
 # ===========================================================================
+
+
+async def test_caching_reduces_stream_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Routes + termini(dir 0) + termini(dir 1) reuse cached passes.
+
+    Down from the pre-caching 3 trips.txt / 5 stop_times.txt passes: with
+    caching this sequence costs exactly 1 trips.txt pass and 2 stop_times.txt
+    passes (candidates once, termini once; the second direction call is
+    served entirely from cache).
+    """
+    counts = _make_counting_iter_csv(monkeypatch)
+    zip_bytes = _make_termini_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsPickerClient(_DUMMY_URL, session)
+    await client.async_load()
+    counts.clear()
+
+    await client.async_get_routes_for_stop("S1")
+    await client.async_get_termini("S1", "R1", 0)
+    await client.async_get_termini("S1", "R1", 1)
+
+    assert counts.get("trips.txt", 0) == 1
+    assert counts.get("stop_times.txt", 0) == 2
+
+
+async def test_routes_only_defers_termini_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """async_get_routes_for_stop alone never triggers a termini pass."""
+    counts = _make_counting_iter_csv(monkeypatch)
+    zip_bytes = _make_termini_zip()
+    session = _make_session(status=200, body=zip_bytes)
+    client = StaticGtfsPickerClient(_DUMMY_URL, session)
+    await client.async_load()
+    counts.clear()
+
+    await client.async_get_routes_for_stop("S1")
+
+    assert counts.get("trips.txt", 0) == 1
+    assert counts.get("stop_times.txt", 0) == 1
 
 
 async def test_async_close_releases_archive() -> None:
