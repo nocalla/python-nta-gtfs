@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nta-gtfs"
-version = "0.5.0"
+version = "0.6.0"
 description = "Async Python client for NTA GTFS real-time and static feeds"
 authors = [{name = "Niall O'Callaghan", email = "niallwocallaghan@gmail.com"}]
 keywords = ["gtfs", "nta", "transit", "realtime", "async", "aiohttp"]

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.6.0] - 2026-07-19
+
+### Changed
+
+- `StaticGtfsPickerClient.async_get_routes_for_stop`/`async_get_termini` now
+  build a lazy per-instance trip index and per-`stop_id` candidate/termini
+  caches instead of re-streaming `trips.txt`/`stop_times.txt` on every call,
+  cutting a routes+both-directions-termini sequence from 3/5 passes down to
+  1/2. Public signatures and return contracts are unchanged (#35, #36, #37)
+
 ## [0.5.0] - 2026-07-16
 
 ### Added

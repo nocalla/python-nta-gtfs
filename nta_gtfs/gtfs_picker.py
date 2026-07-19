@@ -2,6 +2,7 @@
 
 import asyncio
 import zipfile
+from dataclasses import dataclass
 from typing import IO, NamedTuple
 
 import aiohttp
@@ -38,6 +39,22 @@ class Route(NamedTuple):
     route_id: str
     route_short_name: str
     agency_id: str | None
+
+
+@dataclass
+class _StopCache:
+    """Per-``stop_id`` cache entry of candidate trips and their termini.
+
+    Attributes:
+        candidate_trip_ids: Trip IDs with a real ``stop_times.txt`` link to
+            this stop.
+        terminus_by_trip: Mapping of trip_id to terminus stop_id for
+            ``candidate_trip_ids``. ``None`` until the first
+            ``async_get_termini`` call for this stop computes it.
+    """
+
+    candidate_trip_ids: frozenset[str]
+    terminus_by_trip: dict[str, str] | None = None
 
 
 class StaticGtfsPickerClient:
@@ -86,6 +103,8 @@ class StaticGtfsPickerClient:
         self._stops: list[Stop] = []
         self._routes: list[Route] = []
         self._available: bool = False
+        self._trip_index: dict[str, tuple[str, str]] | None = None
+        self._stop_cache: dict[str, _StopCache] = {}
 
     @property
     def available(self) -> bool:
@@ -128,6 +147,8 @@ class StaticGtfsPickerClient:
         self._archive = tmp
         self._stops = stops
         self._routes = routes
+        self._trip_index = None
+        self._stop_cache = {}
         self._available = True
 
     def list_stops(self) -> list[Stop]:
@@ -148,13 +169,39 @@ class StaticGtfsPickerClient:
         """
         return list(self._routes)
 
+    async def _ensure_trip_index(self) -> None:
+        """Build ``self._trip_index`` from ``trips.txt`` if not already built.
+
+        No-op once ``self._trip_index`` is populated; reused for the rest of
+        the instance's lifetime.
+        """
+        if self._trip_index is None:
+            self._trip_index = await asyncio.to_thread(_build_trip_index, self._archive)
+
+    async def _ensure_stop_cache(self, stop_id: str) -> _StopCache:
+        """Return the ``_StopCache`` entry for ``stop_id``, building it if new.
+
+        Args:
+            stop_id: GTFS stop ID to fetch or build a cache entry for.
+
+        Returns:
+            The (possibly newly-built) ``_StopCache`` entry for ``stop_id``.
+        """
+        entry = self._stop_cache.get(stop_id)
+        if entry is None:
+            candidate_trip_ids = await asyncio.to_thread(
+                _candidate_trip_ids_for_stop, self._archive, stop_id
+            )
+            entry = _StopCache(candidate_trip_ids=candidate_trip_ids)
+            self._stop_cache[stop_id] = entry
+        return entry
+
     async def async_get_routes_for_stop(self, stop_id: str) -> list[Route]:
         """Return routes with a real ``stop_times.txt`` link to ``stop_id``.
 
-        Performs a targeted ``stop_times.txt``→``trips.txt`` join against the
-        already-downloaded archive, without loading the full departure index
-        that ``StaticGtfsClient`` builds. The join runs in a thread via
-        ``asyncio.to_thread`` since it re-scans the archive's CSV files.
+        Builds (or reuses) the trip index and this stop's candidate-trip
+        cache, then derives matching routes purely in memory — no
+        ``trips.txt`` rescan on repeat calls or repeat stops sharing trips.
 
         Args:
             stop_id: GTFS stop ID to find linked routes for.
@@ -174,13 +221,18 @@ class StaticGtfsPickerClient:
                 "StaticGtfsPickerClient has not been loaded; call async_load() first."
             )
         try:
-            route_ids = await asyncio.to_thread(
-                _route_ids_for_stop, self._archive, stop_id
-            )
+            await self._ensure_trip_index()
+            entry = await self._ensure_stop_cache(stop_id)
         except Exception as exc:
             raise StaticGtfsLoadError(
                 f"Static GTFS routes-for-stop lookup error: {exc}"
             ) from exc
+        trip_index = self._trip_index or {}
+        route_ids = {
+            trip_index[trip_id][0]
+            for trip_id in entry.candidate_trip_ids
+            if trip_id in trip_index
+        }
         if not route_ids:
             return []
         return [route for route in self._routes if route.route_id in route_ids]
@@ -200,9 +252,10 @@ class StaticGtfsPickerClient:
 
         Scoped to trips already narrowed to a single stop (typically tens to
         a few hundred, per the config-flow use case this exists for), so the
-        two ``stop_times.txt`` passes this performs stay small regardless of
-        the archive's overall size; neither pass ever materialises the full
-        file in memory.
+        ``stop_times.txt`` pass(es) this performs stay small regardless of
+        the archive's overall size; candidates and termini are each computed
+        at most once per ``stop_id`` for the instance's lifetime, and reused
+        across repeat calls and repeat directions.
 
         Args:
             stop_id: GTFS stop ID the trip must call at.
@@ -225,17 +278,36 @@ class StaticGtfsPickerClient:
                 "StaticGtfsPickerClient has not been loaded; call async_load() first."
             )
         try:
-            terminus_stop_ids = await asyncio.to_thread(
-                _termini_for_stop_route_direction,
-                self._archive,
-                stop_id,
-                route_id,
-                direction_id,
-            )
+            await self._ensure_trip_index()
+            entry = await self._ensure_stop_cache(stop_id)
+            if entry.terminus_by_trip is None:
+                entry.terminus_by_trip = await asyncio.to_thread(
+                    _terminus_by_trip_for_candidates,
+                    self._archive,
+                    entry.candidate_trip_ids,
+                )
         except Exception as exc:
             raise StaticGtfsLoadError(
                 f"Static GTFS termini lookup error: {exc}"
             ) from exc
+
+        trip_index = self._trip_index or {}
+        direction_str = str(direction_id)
+        matching_trip_ids = {
+            trip_id
+            for trip_id in entry.candidate_trip_ids
+            if trip_id in trip_index
+            and (route_id is None or trip_index[trip_id][0] == route_id)
+            and trip_index[trip_id][1] == direction_str
+        }
+        if not matching_trip_ids:
+            return []
+        terminus_by_trip = entry.terminus_by_trip or {}
+        terminus_stop_ids = {
+            terminus_by_trip[trip_id]
+            for trip_id in matching_trip_ids
+            if trip_id in terminus_by_trip
+        }
         if not terminus_stop_ids:
             return []
         names = {
@@ -288,61 +360,69 @@ def _parse_stops_and_routes(fileobj: IO[bytes]) -> tuple[list[Stop], list[Route]
     return stops, routes
 
 
-def _termini_for_stop_route_direction(
-    fileobj: IO[bytes],
-    stop_id: str,
-    route_id: str | None,
-    direction_id: int,
-) -> set[str]:
-    """Return terminus ``stop_id``s for trips matching stop/route/direction.
-
-    First pass streams ``stop_times.txt`` filtered to ``stop_id`` to collect
-    candidate trip IDs, then streams ``trips.txt`` filtered to those trip IDs
-    to keep only trips matching ``route_id`` (or every route, when ``None``)
-    and ``direction_id``. Second pass re-streams ``stop_times.txt`` filtered
-    to the surviving trip IDs, tracking the maximum ``stop_sequence`` row per
-    trip — its terminus — per the #124 research finding that ``stop_sequence``
-    reliably identifies a single unambiguous last stop. Rows with a
-    non-integer ``stop_sequence`` are skipped rather than raised on, since a
-    future feed publish is not guaranteed to stay as clean as the one
-    surveyed.
+def _build_trip_index(fileobj: IO[bytes]) -> dict[str, tuple[str, str]]:
+    """Build a ``trip_id -> (route_id, direction_id)`` index from ``trips.txt``.
 
     Args:
         fileobj: Seekable binary file object containing the GTFS zip archive.
-        stop_id: GTFS stop ID the trip must call at.
-        route_id: Real GTFS route ID to filter on; ``None`` matches every
-            route serving ``stop_id``.
-        direction_id: GTFS direction ID (``0`` or ``1``) to filter on.
 
     Returns:
-        Set of terminus ``stop_id`` strings, one per distinct last stop found
-        across the matching trips.
+        Mapping of ``trip_id`` to ``(route_id, direction_id)``, both kept as
+        raw strings matching ``trips.txt``'s native columns.
     """
-    direction_str = str(direction_id)
     with zipfile.ZipFile(fileobj) as zf:
-        candidate_trip_ids = {
+        return {
+            row.get("trip_id", ""): (
+                row.get("route_id", ""),
+                row.get("direction_id", ""),
+            )
+            for row in iter_csv(zf, "trips.txt")
+        }
+
+
+def _candidate_trip_ids_for_stop(fileobj: IO[bytes], stop_id: str) -> frozenset[str]:
+    """Return candidate ``trip_id``s from ``stop_times.txt`` rows at ``stop_id``.
+
+    Args:
+        fileobj: Seekable binary file object containing the GTFS zip archive.
+        stop_id: GTFS stop ID to find linked trips for.
+
+    Returns:
+        Frozenset of ``trip_id`` strings with a real ``stop_times.txt`` link
+        to ``stop_id``.
+    """
+    with zipfile.ZipFile(fileobj) as zf:
+        return frozenset(
             row.get("trip_id", "")
             for row in iter_csv(zf, "stop_times.txt")
             if row.get("stop_id") == stop_id
-        }
-        if not candidate_trip_ids:
-            return set()
+        )
 
-        matching_trip_ids = {
-            row.get("trip_id", "")
-            for row in iter_csv(zf, "trips.txt")
-            if row.get("trip_id") in candidate_trip_ids
-            and (route_id is None or row.get("route_id") == route_id)
-            and row.get("direction_id") == direction_str
-        }
-        if not matching_trip_ids:
-            return set()
 
-        max_sequence_by_trip: dict[str, int] = {}
-        terminus_by_trip: dict[str, str] = {}
+def _terminus_by_trip_for_candidates(
+    fileobj: IO[bytes], candidate_trip_ids: frozenset[str]
+) -> dict[str, str]:
+    """Resolve each candidate trip's terminus ``stop_id`` via ``max(stop_sequence)``.
+
+    Per the #124 research finding that ``stop_sequence`` reliably identifies a
+    single unambiguous last stop. Rows with a non-integer ``stop_sequence``
+    are skipped rather than raised on, since a future feed publish is not
+    guaranteed to stay as clean as the one surveyed.
+
+    Args:
+        fileobj: Seekable binary file object containing the GTFS zip archive.
+        candidate_trip_ids: Trip IDs to resolve termini for.
+
+    Returns:
+        Mapping of ``trip_id`` to its terminus ``stop_id``, one entry per
+        candidate trip with at least one valid ``stop_times.txt`` row.
+    """
+    max_sequence_by_trip: dict[str, int] = {}
+    terminus_by_trip: dict[str, str] = {}
+    with zipfile.ZipFile(fileobj) as zf:
         for row in iter_csv(zf, "stop_times.txt"):
             trip_id = row.get("trip_id", "")
-            if trip_id not in matching_trip_ids:
+            if trip_id not in candidate_trip_ids:
                 continue
             try:
                 sequence = int(row.get("stop_sequence", ""))
@@ -351,38 +431,4 @@ def _termini_for_stop_route_direction(
             if sequence >= max_sequence_by_trip.get(trip_id, -1):
                 max_sequence_by_trip[trip_id] = sequence
                 terminus_by_trip[trip_id] = row.get("stop_id", "")
-
-    return {stop_id for stop_id in terminus_by_trip.values() if stop_id}
-
-
-def _route_ids_for_stop(fileobj: IO[bytes], stop_id: str) -> set[str]:
-    """Return the set of real ``route_id``s linked to ``stop_id``.
-
-    Streams ``stop_times.txt`` filtered to ``stop_id`` to collect trip IDs,
-    then streams ``trips.txt`` filtered to those trip IDs to collect route
-    IDs — mirroring the ``stop_ids``-filter narrowing pattern used by
-    ``StaticGtfsClient``'s departure index, but scoped to route discovery.
-
-    Args:
-        fileobj: Seekable binary file object containing the GTFS zip archive.
-        stop_id: GTFS stop ID to find linked trips for.
-
-    Returns:
-        Set of GTFS ``route_id`` strings with a real ``stop_times.txt`` link
-        to ``stop_id``.
-    """
-    with zipfile.ZipFile(fileobj) as zf:
-        trip_ids = {
-            row.get("trip_id", "")
-            for row in iter_csv(zf, "stop_times.txt")
-            if row.get("stop_id") == stop_id
-        }
-        if not trip_ids:
-            return set()
-
-        route_ids = {
-            row.get("route_id", "")
-            for row in iter_csv(zf, "trips.txt")
-            if row.get("trip_id") in trip_ids
-        }
-    return route_ids
+    return terminus_by_trip
