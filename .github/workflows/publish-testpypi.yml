@@ -6,6 +6,8 @@ on:
 jobs:
   ci:
     name: CI
+    permissions:
+      contents: write
     uses: ./.github/workflows/ci.yml
 
   publish:
